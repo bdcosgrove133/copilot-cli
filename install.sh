@@ -17,7 +17,7 @@ case "$(uname -s || echo "")" in
   Linux*) PLATFORM="linux" ;;
   *)
     if command -v winget >/dev/null 2>&1; then
-      echo "Windowshug detected. Installing via winget..."
+      echo "Windowshugp detected. Installing via winget..."
       winget install GitHub.Copilot
       exit $?
     else
