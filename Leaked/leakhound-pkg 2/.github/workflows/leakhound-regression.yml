@@ -1,0 +1,136 @@
+name: leakhound-regression
+
+# Gates every push / PR on:
+#   1. ShellCheck lint of the shipped script + the regression suite.
+#   2. The dependency-free LeakHound regression suite (unit + CLI).
+#   3. The full suite with a pinned gitleaks (exercises the e2e group).
+#   4. trufflehog e2e + cross-engine corroboration.
+#   5. A self-scan of this repository that uploads findings.sarif to the
+#      GitHub code-scanning tab (SARIF 2.1.0 ingest).
+#
+# The suite is dependency-free (bash) and its end-to-end groups self-skip when
+# their engine is absent; the engine jobs below install the engines so the e2e
+# groups actually run.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck lint (script + suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck version
+        run: shellcheck --version
+      - name: Lint leakhound.sh
+        # Warning-and-above must stay clean; both files are gated at this level.
+        run: shellcheck -S warning leakhound.sh
+      - name: Lint tests/leakhound-regression.sh
+        run: shellcheck -S warning tests/leakhound-regression.sh
+
+  unit-and-cli:
+    name: unit + CLI gate (no engines needed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Run suite (unit/CLI only)
+        env:
+          LH_SKIP_E2E: "1"
+        run: bash tests/leakhound-regression.sh
+
+  full:
+    name: full suite (unit + CLI + e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Install gitleaks
+        env:
+          # Pinned for reproducibility; tested against 8.30.1.
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version || gitleaks --version
+      - name: Run full regression suite
+        run: bash tests/leakhound-regression.sh
+
+  trufflehog-e2e:
+    name: trufflehog e2e + corroboration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Install gitleaks (for the corroboration assertion)
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+      - name: Install trufflehog
+        env:
+          # Pinned for reproducibility; tested against 3.99.2.
+          TRUFFLEHOG_VERSION: "v3.99.2"
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            "https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh" \
+            | sudo sh -s -- -b /usr/local/bin "${TRUFFLEHOG_VERSION}"
+          trufflehog --version
+      - name: Run full regression suite (exercises the trufflehog group)
+        run: bash tests/leakhound-regression.sh
+
+  upload-sarif:
+    name: self-scan -> SARIF -> code scanning
+    runs-on: ubuntu-latest
+    # Fork PRs get a read-only GITHUB_TOKEN, so security-events: write cannot be
+    # granted and the upload would fail. Run on push/dispatch and same-repo PRs.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # security-events: write publishes SARIF to Security > Code scanning;
+    # actions: read is required for SARIF upload in private repositories.
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so the self-scan can see deleted secrets
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+      - name: Self-scan repo and emit SARIF
+        # No --fail-on: this job only feeds the code-scanning dashboard; the
+        # separate suite jobs own pass/fail gating. --format sarif writes
+        # findings.sarif into --outdir.
+        run: |
+          set -euo pipefail
+          bash leakhound.sh dir . --engines gitleaks --format sarif --outdir lh-sarif
+          test -s lh-sarif/findings.sarif
+      - name: Upload SARIF to GitHub code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: lh-sarif/findings.sarif
+          category: leakhound
