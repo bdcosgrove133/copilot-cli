@@ -1,0 +1,39 @@
+# .pre-commit-hooks.yaml
+#
+# Makes LeakHound consumable by the `pre-commit` framework (https://pre-commit.com).
+# A downstream repository adds, in its own .pre-commit-config.yaml:
+#
+#   repos:
+#     - repo: <url-or-path-to-this-leakhound-repo>
+#       rev: <tag-or-sha>
+#       hooks:
+#         - id: leakhound
+#
+# Then: pre-commit install && pre-commit run --all-files
+#
+# LeakHound is a plain executable (language: script), so pre-commit clones the
+# hook repo and runs leakhound.sh directly -- no extra runtime or package
+# manager. The hook scans the checked-out tree with the fast gitleaks engine
+# and writes a SARIF report so the same rule catalogue used in CI applies.
+
+- id: leakhound
+  name: LeakHound secret scan
+  description: >
+    Scan the working tree for secrets with LeakHound (gitleaks engine) and emit
+    SARIF. Blocks the commit when the configured --fail-on threshold is met.
+  entry: leakhound.sh
+  args:
+    - dir
+    - "."
+    - --engines
+    - gitleaks
+    - --format
+    - sarif
+    - --fail-on
+    - high
+    - --quiet
+  language: script
+  # LeakHound discovers its own targets; do not append changed filenames.
+  pass_filenames: false
+  always_run: true
+  stages: [pre-commit]
